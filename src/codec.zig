@@ -1,0 +1,395 @@
+const std = @import("std");
+const print = std.debug.print;
+const assert = std.debug.assert;
+
+pub const FrontendMsg = union(enum) {
+    Startup: StartupMsg,
+
+    pub fn encode(self: *const FrontendMsg, buf: []u8) !void {
+        return switch (self.*) {
+            .Startup => |startup_msg| startup_msg.encode(buf),
+        };
+    }
+
+    pub fn size(self: *const FrontendMsg) usize {
+        return switch (self.*) {
+            .Startup => |startup| startup.size(),
+        };
+    }
+};
+
+const MsgType = enum(u8) {
+    AuthRes = 'R',
+    ErrorRes = 'E',
+};
+
+pub const BackendMsg = union(enum) {
+    Auth: AuthRes,
+    Error: ErrorRes,
+
+    pub fn decode(buf: []const u8, codec: *Codec) !BackendMsg {
+        assert(buf.len > 0);
+        const msg_type = try std.meta.intToEnum(MsgType, buf[0]);
+        switch (msg_type) {
+            .AuthRes => {
+                const auth_res = try AuthRes.decode(buf[1..]);
+                return BackendMsg{ .Auth = auth_res };
+            },
+            .ErrorRes => {
+                const error_res = try ErrorRes.decode(buf[1..], codec);
+                return BackendMsg{ .Error = error_res };
+            },
+        }
+    }
+
+    pub fn free(self: *BackendMsg, alloc: std.mem.Allocator) void {
+        switch (self.*) {
+            .Error => |error_res| {
+                if (error_res.field) |field| {
+                    alloc.free(field);
+                }
+            },
+            else => return,
+        }
+    }
+};
+
+pub const Codec = struct {
+    alloc: std.mem.Allocator,
+    store: std.ArrayList([]u8),
+
+    pub fn init(alloc: std.mem.Allocator) Codec {
+        return Codec{ .alloc = alloc, .store = std.ArrayList([]u8).init(alloc) };
+    }
+
+    pub fn decode(self: *Codec, buf: []const u8) !BackendMsg {
+        return try BackendMsg.decode(buf, self);
+    }
+
+    pub fn encode(self: *Codec, msg: *const FrontendMsg) ![]const u8 {
+        const buf = try self.alloc.alloc(u8, msg.size());
+        try self.store.append(buf);
+        try msg.encode(buf);
+        return buf;
+    }
+
+    pub fn deinit(self: *Codec) void {
+        for (self.store.items) |stored| self.alloc.free(stored);
+        self.store.deinit();
+    }
+};
+
+const ErrorRes = struct {
+    msg_type: MsgType = MsgType.ErrorRes,
+    len: u32,
+    error_type: ErrorType,
+    field: ?[]const u8 = null,
+
+    // posibility of an unrecognisable error code being added
+    // postgres reccomends ignoring them.
+    // https://www.postgresql.org/docs/current/protocol-error-fields.html
+    const ErrorType = enum(u8) {
+        Severity = 'S',
+        LocalizedSeverity = 'V',
+        SQLState = 'C',
+        Message = 'M',
+        Detail = 'D',
+        Hint = 'H',
+        Position = 'P',
+        InternalPosition = 'p',
+        InternalQuery = 'q',
+        Where = 'W',
+        SchemaName = 's',
+        TableName = 't',
+        ColumnName = 'c',
+        DataTypeName = 'd',
+        ConstraintName = 'n',
+        File = 'F',
+        Line = 'L',
+        Routine = 'R',
+    };
+
+    pub fn decode(buf: []const u8, codec: *Codec) !ErrorRes {
+        assert(buf.len >= 5);
+        const len = std.mem.readInt(u32, buf[0..4], .little);
+        assert(len == buf[0..].len);
+
+        const error_type: ErrorType = try std.meta.intToEnum(
+            ErrorType,
+            buf[4],
+        );
+
+        if (buf[5..].len > 0) {
+            const field_buf = try codec.alloc.alloc(u8, buf[5..].len);
+            try codec.store.append(field_buf);
+            @memcpy(field_buf, buf[5..]);
+            return ErrorRes{ .len = len, .error_type = error_type, .field = field_buf };
+        }
+        return ErrorRes{ .len = len, .error_type = error_type };
+    }
+};
+
+const AuthRes = struct {
+    msg_type: MsgType = MsgType.AuthRes,
+    len: u32,
+    auth_type: AuthType,
+    extra: AuthExtra = .None,
+
+    const AuthType = enum(u32) {
+        Ok = 0,
+        KerberosV5 = 2,
+        ClearTextPassword = 3,
+        MD5Password = 5,
+        GSS = 7,
+        GSSContinue = 8,
+        SSPI = 9,
+        SASL = 10,
+        SASLContinue = 11,
+        SASLFinal = 12,
+    };
+
+    const AuthExtra = union(enum) {
+        MD5Password: struct { salt: [4]u8 },
+        GSSContinue: struct { data: []u8 },
+        SASL: struct { mechanism: []const u8 }, // null terminated list of auth schemes will require enum once those are found.
+        SASLContinue: struct { data: []u8 },
+        SALSFinal: struct { data: []u8 },
+        None,
+    };
+
+    pub fn decode(buf: []const u8) !AuthRes {
+        assert(buf.len >= 8);
+        const len = std.mem.readInt(u32, buf[0..4], .little);
+        assert(len == buf[0..].len);
+
+        const auth_type: AuthType = try std.meta.intToEnum(
+            AuthType,
+            std.mem.readInt(u32, buf[4..8], .little),
+        );
+
+        const extra = switch (auth_type) {
+            .MD5Password => extra: {
+                assert(buf[8..].len == 4);
+                var salt: [4]u8 = undefined;
+                @memcpy(&salt, buf[8..]);
+                break :extra AuthExtra{ .MD5Password = .{ .salt = salt } };
+            },
+            else => AuthExtra.None,
+        };
+
+        return AuthRes{ .len = len, .auth_type = auth_type, .extra = extra };
+    }
+};
+
+const StartupMsg = struct {
+    len: u32,
+    protocol: u32 = 0x00030000, // 16 sig bit for major 16 bit for minor
+    user: ValuePair,
+    database: ?ValuePair = null,
+    options: ?ValuePair = null, // Depracated in postgres
+    replication: ?ValuePair = null,
+
+    pub fn encode(self: *const StartupMsg, buf: []u8) !void {
+        var w_pos: usize = 0;
+        const len_width = width(self.len);
+        const proto_width = width(self.protocol);
+
+        w_pos += writeInt(self.len, buf[w_pos..len_width][0..len_width]);
+        w_pos += writeInt(self.protocol, buf[w_pos .. w_pos + proto_width][0..proto_width]);
+        w_pos += writeValuePair(self.user, buf[w_pos .. w_pos + self.user.size()][0..self.user.size()]);
+        w_pos += writeOptional(self.database, w_pos, buf);
+        w_pos += writeOptional(self.options, w_pos, buf);
+        w_pos += writeOptional(self.replication, w_pos, buf);
+    }
+
+    pub fn size(self: *const StartupMsg) usize {
+        return width(self.len) +
+            width(self.protocol) +
+            width(self.user) +
+            width(self.database) +
+            width(self.options) +
+            width(self.replication);
+    }
+};
+
+pub const ValuePair = struct {
+    key: []const u8,
+    val: []const u8,
+    const padding: usize = 1;
+
+    pub fn size(self: *const ValuePair) usize {
+        return self.key.len + self.val.len + padding;
+    }
+};
+
+pub fn writeValuePair(value_pair: ValuePair, buf: []u8) usize {
+    assert(buf.len == value_pair.size());
+    _ = writeSlice(value_pair.key, buf[0..value_pair.key.len]);
+    _ = writeSlice(value_pair.val, buf[value_pair.key.len .. value_pair.key.len + value_pair.val.len]);
+    buf[value_pair.key.len + value_pair.val.len] = 0x00; // padding
+
+    return buf.len;
+}
+
+pub fn writeSlice(slice: anytype, buf: []u8) usize {
+    assert(@typeInfo(@TypeOf(slice)) == .Pointer);
+    assert(buf.len == width(slice));
+    @memcpy(buf, slice);
+    return buf.len;
+}
+
+pub fn writeInt(int: anytype, buf: []u8) usize {
+    const T = @TypeOf(int);
+    assert(@typeInfo(T) == .Int);
+    assert(buf.len == @sizeOf(T));
+
+    std.mem.writeInt(T, buf[0..@sizeOf(T)], int, .little);
+    return buf.len;
+}
+
+pub fn writeOptional(op_val: anytype, w_pos: usize, buf: []u8) usize {
+    assert(@typeInfo(@TypeOf(op_val)) == .Optional);
+    if (op_val) |val| {
+        if (@TypeOf(val) == ValuePair) return writeValuePair(val, buf[w_pos .. w_pos + val.size()]);
+
+        return switch (@typeInfo(@TypeOf(val))) {
+            .Pointer => writeSlice(val, buf),
+            .Int => writeInt(val, buf),
+            else => std.debug.panic("Unsupported Type: {}", .{@TypeOf(val)}),
+        };
+    }
+    return 0;
+}
+
+pub fn width(val: anytype) usize {
+    const T = @TypeOf(val);
+
+    if (T == ValuePair) return val.size();
+
+    return switch (@typeInfo(T)) {
+        .Pointer => |ptr| {
+            assert(@typeInfo(ptr.child) == .Int);
+            return @sizeOf(ptr.child) * val.len;
+        },
+        .Int => @sizeOf(T),
+        .Optional => if (val) |value| width(value) else 0,
+        else => std.debug.panic("Unsupported Type: {}", .{T}),
+    };
+}
+
+test "decode auth res" {
+    const alloc = std.testing.allocator;
+
+    const input = &[_]u8{ 'R', 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    var codec = Codec.init(alloc);
+    const result = try codec.decode(input);
+    defer codec.deinit();
+
+    const expected = AuthRes{
+        .len = 8,
+        .auth_type = .Ok,
+    };
+
+    try std.testing.expect(testAuthRes(result, expected));
+}
+
+test "decode error" {
+    const alloc = std.testing.allocator;
+
+    const input = &[_]u8{ 'E', 0x0a, 0x00, 0x00, 0x00, 'S', 'P', 'A', 'N', 'I', 'C' };
+    var codec = Codec.init(alloc);
+    const result = try codec.decode(input);
+    defer codec.deinit();
+
+    const expected = ErrorRes{
+        .len = 10,
+        .error_type = ErrorRes.ErrorType.Severity,
+        .field = "PANIC",
+    };
+
+    try std.testing.expect(testErrorRes(result, expected));
+}
+
+test "encode startup" {
+    const alloc = std.testing.allocator;
+    var codec = Codec.init(alloc);
+    defer codec.deinit();
+
+    const msg = FrontendMsg{
+        .Startup = StartupMsg{
+            .len = 30,
+            .user = ValuePair{ .key = "user", .val = "test" },
+            .database = ValuePair{ .key = "database", .val = "test" },
+        },
+    };
+    const result = try codec.encode(&msg);
+
+    const expect = &[_]u8{
+        0x1e, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x03, 0x00,
+        0x75, 0x73, 0x65, 0x72,
+        0x74, 0x65, 0x73, 0x74,
+        0x00, 0x64, 0x61, 0x74,
+        0x61, 0x62, 0x61, 0x73,
+        0x65, 0x74, 0x65, 0x73,
+        0x74, 0x00,
+    };
+    try std.testing.expect(std.mem.eql(u8, expect, result));
+}
+
+fn testErrorRes(res: BackendMsg, expected: ErrorRes) bool {
+    const error_res = switch (res) {
+        .Error => |auth| auth,
+        else => return false,
+    };
+    if (error_res.msg_type != expected.msg_type) {
+        print("Incorrect msg_type found: {} expected: {}\n", .{ error_res.msg_type, expected.msg_type });
+        return false;
+    }
+    if (error_res.len != expected.len) {
+        print("Inccorect len found: {d} expected: {d}\n", .{ error_res.len, expected.len });
+        return false;
+    }
+    if (error_res.error_type != expected.error_type) {
+        print("Inccorect error_type found: {} expected: {}\n", .{ error_res.error_type, expected.error_type });
+        return false;
+    }
+    const res_field = if (error_res.field) |res_field| res_field else "";
+    const expected_field = if (expected.field) |expected_field| expected_field else "";
+
+    if ((res_field.len > 0 or expected_field.len > 0) and !std.mem.eql(u8, res_field, expected_field)) {
+        print("Inccorect field found: {s} expected: {s}\n", .{ res_field, expected_field });
+        return false;
+    }
+    return true;
+}
+
+fn testAuthRes(res: BackendMsg, expected: AuthRes) bool {
+    const auth_res = switch (res) {
+        .Auth => |auth| auth,
+        else => return false,
+    };
+    if (auth_res.msg_type != expected.msg_type) {
+        print("Incorrect msg_type found: {} expected: {}\n", .{ auth_res.msg_type, expected.msg_type });
+        return false;
+    }
+    if (auth_res.len != expected.len) {
+        print("Inccorect len found: {d} expected: {d}\n", .{ auth_res.len, expected.len });
+        return false;
+    }
+    if (auth_res.auth_type != expected.auth_type) {
+        print("Inccorect auth_type found: {} expected: {}\n", .{ auth_res.auth_type, expected.auth_type });
+        return false;
+    }
+    if (std.meta.activeTag(auth_res.extra) != std.meta.activeTag(expected.extra)) {
+        print("Inccorect auth_type found: {} expected: {}\n", .{ auth_res.auth_type, expected.auth_type });
+        return false;
+    }
+    if (auth_res.extra == .MD5Password and expected.extra == .MD5Password) {
+        if (!std.mem.eql(u8, &auth_res.extra.MD5Password.salt, &expected.extra.MD5Password.salt)) {
+            print("Inccorect extra found: {s} expected: {s}\n", .{ auth_res.extra.MD5Password.salt, expected.extra.MD5Password.salt });
+            return false;
+        }
+    }
+    return true;
+}
