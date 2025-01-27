@@ -2,8 +2,19 @@ const std = @import("std");
 const print = std.debug.print;
 const assert = std.debug.assert;
 
-pub const FrontendMsg = union(enum) {
+pub const FrontendMsg = union(FrontendMsgType) {
     Startup: StartupMsg,
+
+    const FrontendMsgType = enum {
+        Startup,
+    };
+
+    pub fn new(msg_type: FrontendMsgType, ctx: anytype) FrontendMsg {
+        assert(@typeInfo(@TypeOf(ctx)) == .Struct);
+        return switch (msg_type) {
+            .Startup => .{ .Startup = StartupMsg.new(ctx.user, ctx.database) },
+        };
+    }
 
     pub fn encode(self: *const FrontendMsg, buf: []u8) !void {
         return switch (self.*) {
@@ -18,28 +29,47 @@ pub const FrontendMsg = union(enum) {
     }
 };
 
-const MsgType = enum(u8) {
-    AuthRes = 'R',
-    ErrorRes = 'E',
-};
-
 pub const BackendMsg = union(enum) {
     Auth: AuthRes,
     Error: ErrorRes,
 
+    const MsgType = enum(u8) {
+        AuthRes = 'R',
+        ErrorRes = 'E',
+    };
+
+    const HEADER_SIZE: usize = 5;
+
+    const Header = struct {
+        msg_type: MsgType,
+        len: u32,
+    };
+
     pub fn decode(buf: []const u8, codec: *Codec) !BackendMsg {
-        assert(buf.len > 0);
-        const msg_type = try std.meta.intToEnum(MsgType, buf[0]);
-        switch (msg_type) {
+        const header = parseHeader(buf);
+
+        switch (header.msg_type) {
             .AuthRes => {
-                const auth_res = try AuthRes.decode(buf[1..]);
+                const auth_res = try AuthRes.decode(buf[HEADER_SIZE..]);
                 return BackendMsg{ .Auth = auth_res };
             },
             .ErrorRes => {
-                const error_res = try ErrorRes.decode(buf[1..], codec);
+                const error_res = try ErrorRes.decode(buf[HEADER_SIZE..], codec);
                 return BackendMsg{ .Error = error_res };
             },
         }
+    }
+
+    fn parseHeader(buf: []const u8) Header {
+        assert(buf.len > HEADER_SIZE);
+        const msg_type: MsgType = @enumFromInt(buf[0]);
+        const len = std.mem.readInt(u32, buf[1..5], .little);
+        assert(len == buf[1..].len);
+
+        return .{
+            .msg_type = msg_type,
+            .len = len,
+        };
     }
 
     pub fn free(self: *BackendMsg, alloc: std.mem.Allocator) void {
@@ -79,9 +109,17 @@ pub const Codec = struct {
     }
 };
 
+pub const ValuePair = struct {
+    key: []const u8,
+    val: []const u8,
+    const padding: usize = 2;
+
+    pub fn size(self: *const ValuePair) usize {
+        return self.key.len + self.val.len + padding;
+    }
+};
+
 const ErrorRes = struct {
-    msg_type: MsgType = MsgType.ErrorRes,
-    len: u32,
     error_type: ErrorType,
     field: ?[]const u8 = null,
 
@@ -110,28 +148,23 @@ const ErrorRes = struct {
     };
 
     pub fn decode(buf: []const u8, codec: *Codec) !ErrorRes {
-        assert(buf.len >= 5);
-        const len = std.mem.readInt(u32, buf[0..4], .little);
-        assert(len == buf[0..].len);
+        const type_offset = 1;
 
-        const error_type: ErrorType = try std.meta.intToEnum(
-            ErrorType,
-            buf[4],
-        );
+        assert(buf.len >= type_offset);
 
-        if (buf[5..].len > 0) {
-            const field_buf = try codec.alloc.alloc(u8, buf[5..].len);
+        const error_type: ErrorType = @enumFromInt(buf[0]);
+
+        if (buf[type_offset..].len > 0) {
+            const field_buf = try codec.alloc.alloc(u8, buf[type_offset..].len);
             try codec.store.append(field_buf);
-            @memcpy(field_buf, buf[5..]);
-            return ErrorRes{ .len = len, .error_type = error_type, .field = field_buf };
+            @memcpy(field_buf, buf[type_offset..]);
+            return ErrorRes{ .error_type = error_type, .field = field_buf };
         }
-        return ErrorRes{ .len = len, .error_type = error_type };
+        return ErrorRes{ .error_type = error_type };
     }
 };
 
 const AuthRes = struct {
-    msg_type: MsgType = MsgType.AuthRes,
-    len: u32,
     auth_type: AuthType,
     extra: AuthExtra = .None,
 
@@ -158,43 +191,53 @@ const AuthRes = struct {
     };
 
     pub fn decode(buf: []const u8) !AuthRes {
-        assert(buf.len >= 8);
-        const len = std.mem.readInt(u32, buf[0..4], .little);
-        assert(len == buf[0..].len);
+        const type_offset: usize = 4;
+        assert(buf.len >= type_offset);
 
-        const auth_type: AuthType = try std.meta.intToEnum(
-            AuthType,
-            std.mem.readInt(u32, buf[4..8], .little),
-        );
-
+        const auth_type: AuthType = @enumFromInt(std.mem.readInt(u32, buf[0..type_offset], .little));
         const extra = switch (auth_type) {
             .MD5Password => extra: {
-                assert(buf[8..].len == 4);
+                assert(buf[type_offset..].len == 4);
                 var salt: [4]u8 = undefined;
-                @memcpy(&salt, buf[8..]);
+                @memcpy(&salt, buf[type_offset..]);
                 break :extra AuthExtra{ .MD5Password = .{ .salt = salt } };
             },
             else => AuthExtra.None,
         };
 
-        return AuthRes{ .len = len, .auth_type = auth_type, .extra = extra };
+        return AuthRes{ .auth_type = auth_type, .extra = extra };
     }
 };
 
-const StartupMsg = struct {
-    len: u32,
+// TODO: allow for passing in option, replication and protocol
+// currenly going to just use ver 3 protocol and not worry about
+// options and replication
+pub const StartupMsg = struct {
     protocol: u32 = 0x00030000, // 16 sig bit for major 16 bit for minor
     user: ValuePair,
     database: ?ValuePair = null,
-    options: ?ValuePair = null, // Depracated in postgres
-    replication: ?ValuePair = null,
+    options: ?ValuePair = null, // Depracated in postgres but leaving here
+    replication: ?ValuePair = null, // not going to use for now but leaving here
+
+    pub fn new(usr: []const u8, database: ?[]const u8) StartupMsg {
+        const user = ValuePair{ .key = "user", .val = usr };
+        // const len = width(database) + user.size() + @sizeOf(u32) + @sizeOf(u32);
+        const db: ?ValuePair = if (database) |db| .{ .key = "database", .val = db } else null;
+
+        return .{
+            // .len = @intCast(len),
+            .user = user,
+            .database = db,
+        };
+    }
 
     pub fn encode(self: *const StartupMsg, buf: []u8) !void {
         var w_pos: usize = 0;
-        const len_width = width(self.len);
-        const proto_width = width(self.protocol);
+        const len_width = 4;
+        const proto_width = 4;
 
-        w_pos += writeInt(self.len, buf[w_pos..len_width][0..len_width]);
+        const len: u32 = @intCast(width(self.database) + self.user.size() + len_width + proto_width); // len and proto width
+        w_pos += writeInt(len, buf[w_pos..len_width][0..len_width]);
         w_pos += writeInt(self.protocol, buf[w_pos .. w_pos + proto_width][0..proto_width]);
         w_pos += writeValuePair(self.user, buf[w_pos .. w_pos + self.user.size()][0..self.user.size()]);
         w_pos += writeOptional(self.database, w_pos, buf);
@@ -203,30 +246,19 @@ const StartupMsg = struct {
     }
 
     pub fn size(self: *const StartupMsg) usize {
-        return width(self.len) +
-            width(self.protocol) +
-            width(self.user) +
+        return 8 + width(self.user) +
             width(self.database) +
             width(self.options) +
             width(self.replication);
     }
 };
 
-pub const ValuePair = struct {
-    key: []const u8,
-    val: []const u8,
-    const padding: usize = 1;
-
-    pub fn size(self: *const ValuePair) usize {
-        return self.key.len + self.val.len + padding;
-    }
-};
-
 pub fn writeValuePair(value_pair: ValuePair, buf: []u8) usize {
     assert(buf.len == value_pair.size());
     _ = writeSlice(value_pair.key, buf[0..value_pair.key.len]);
-    _ = writeSlice(value_pair.val, buf[value_pair.key.len .. value_pair.key.len + value_pair.val.len]);
-    buf[value_pair.key.len + value_pair.val.len] = 0x00; // padding
+    buf[value_pair.key.len] = 0x00; // padding
+    _ = writeSlice(value_pair.val, buf[value_pair.key.len + 1 .. value_pair.key.len + 1 + value_pair.val.len]);
+    buf[value_pair.key.len + 1 + value_pair.val.len] = 0x00; // padding
 
     return buf.len;
 }
@@ -286,7 +318,6 @@ test "decode auth res" {
     defer codec.deinit();
 
     const expected = AuthRes{
-        .len = 8,
         .auth_type = .Ok,
     };
 
@@ -302,7 +333,6 @@ test "decode error" {
     defer codec.deinit();
 
     const expected = ErrorRes{
-        .len = 10,
         .error_type = ErrorRes.ErrorType.Severity,
         .field = "PANIC",
     };
@@ -317,7 +347,6 @@ test "encode startup" {
 
     const msg = FrontendMsg{
         .Startup = StartupMsg{
-            .len = 30,
             .user = ValuePair{ .key = "user", .val = "test" },
             .database = ValuePair{ .key = "database", .val = "test" },
         },
@@ -325,15 +354,16 @@ test "encode startup" {
     const result = try codec.encode(&msg);
 
     const expect = &[_]u8{
-        0x1e, 0x00, 0x00, 0x00,
+        0x20, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x03, 0x00,
         0x75, 0x73, 0x65, 0x72,
-        0x74, 0x65, 0x73, 0x74,
-        0x00, 0x64, 0x61, 0x74,
-        0x61, 0x62, 0x61, 0x73,
-        0x65, 0x74, 0x65, 0x73,
-        0x74, 0x00,
+        0x00, 0x74, 0x65, 0x73,
+        0x74, 0x00, 0x64, 0x61,
+        0x74, 0x61, 0x62, 0x61,
+        0x73, 0x65, 0x00, 0x74,
+        0x65, 0x73, 0x74, 0x00,
     };
+
     try std.testing.expect(std.mem.eql(u8, expect, result));
 }
 
@@ -342,14 +372,6 @@ fn testErrorRes(res: BackendMsg, expected: ErrorRes) bool {
         .Error => |auth| auth,
         else => return false,
     };
-    if (error_res.msg_type != expected.msg_type) {
-        print("Incorrect msg_type found: {} expected: {}\n", .{ error_res.msg_type, expected.msg_type });
-        return false;
-    }
-    if (error_res.len != expected.len) {
-        print("Inccorect len found: {d} expected: {d}\n", .{ error_res.len, expected.len });
-        return false;
-    }
     if (error_res.error_type != expected.error_type) {
         print("Inccorect error_type found: {} expected: {}\n", .{ error_res.error_type, expected.error_type });
         return false;
@@ -369,14 +391,6 @@ fn testAuthRes(res: BackendMsg, expected: AuthRes) bool {
         .Auth => |auth| auth,
         else => return false,
     };
-    if (auth_res.msg_type != expected.msg_type) {
-        print("Incorrect msg_type found: {} expected: {}\n", .{ auth_res.msg_type, expected.msg_type });
-        return false;
-    }
-    if (auth_res.len != expected.len) {
-        print("Inccorect len found: {d} expected: {d}\n", .{ auth_res.len, expected.len });
-        return false;
-    }
     if (auth_res.auth_type != expected.auth_type) {
         print("Inccorect auth_type found: {} expected: {}\n", .{ auth_res.auth_type, expected.auth_type });
         return false;
