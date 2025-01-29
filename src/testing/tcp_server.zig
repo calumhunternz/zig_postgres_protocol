@@ -1,9 +1,8 @@
 const std = @import("std");
-const ggg = @import("../codec.zig");
-const tested = ggg.BackendMsg;
 const posix = std.posix;
 
-running: std.atomic.Value(bool),
+stopped: std.atomic.Value(bool),
+thread: std.Thread,
 pub const TestServer = @This();
 
 pub const Server = struct {
@@ -72,9 +71,7 @@ pub const Server = struct {
         }
     };
 
-    // TODO set up a struct so that from the test i can just call testing_server.start/stop functions to hide thread management from tests
-
-    pub fn start(port: u16, res: []const u8, running: *std.atomic.Value(bool)) !void {
+    pub fn start(port: u16, res: []const u8, stopped: *std.atomic.Value(bool)) !void {
         const address = try std.net.Address.parseIp("127.0.0.1", port);
         var server = try address.listen(.{ .reuse_port = true });
         errdefer server.deinit();
@@ -84,17 +81,20 @@ pub const Server = struct {
         std.mem.copyForwards(u8, &res_cpy, res);
         const response = res_cpy[0..res.len];
 
+        stopped.store(false, .seq_cst);
         var conn = try server.accept();
-        running.store(true, .seq_cst);
+        std.debug.print("ljlkjljlj: {}\n", .{stopped});
+        // running.store(true, .seq_cst);
         errdefer conn.stream.close();
         var reader = Reader{ .stream = conn.stream };
 
-        while (running.load(.seq_cst)) {
+        while (!stopped.load(.seq_cst)) {
             const red = try reader.read();
             if (red.len > 0) {
                 try conn.stream.writeAll(response);
             }
         }
+        std.debug.print("server stopped \n", .{});
 
         server.deinit();
     }
@@ -105,9 +105,7 @@ pub const TestServerOptions = struct {
 };
 
 pub fn start(options: TestServerOptions) !TestServer {
-    var server = TestServer{
-        .running = std.atomic.Value(bool).init(false),
-    };
+    var stopped = std.atomic.Value(bool).init(true);
     const res: []const u8 = &[_]u8{
         'R',
         0x08,
@@ -123,13 +121,20 @@ pub fn start(options: TestServerOptions) !TestServer {
     const server_thread = try std.Thread.spawn(.{}, Server.start, .{
         options.port,
         res,
-        &server.running,
+        &stopped,
     });
-    defer server_thread.detach();
+    std.debug.print("stopped in server manager {}\n", .{stopped.load(.seq_cst)});
+    while (!stopped.load(.seq_cst)) std.time.sleep(1000000);
+    std.debug.print("returning test server (running {})\n", .{stopped.load(.seq_cst)});
 
-    return server;
+    return .{
+        .stopped = stopped,
+        .thread = server_thread,
+    };
 }
 
 pub fn stop(self: *TestServer) void {
-    self.running.store(false, .seq_cst);
+    std.debug.print("stopping\n", .{});
+    self.stopped.store(true, .seq_cst);
+    self.thread.detach();
 }

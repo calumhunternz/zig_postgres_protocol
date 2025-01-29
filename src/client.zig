@@ -5,6 +5,10 @@ const http = std.http;
 const Allocator = std.mem.Allocator;
 const Protocol = http.Client.Connection.Protocol;
 
+pub const ClientError = error{
+    InvalidConnectionOptions,
+};
+
 pub const PostgresClient = struct {
     allocator: Allocator,
     connection: Connection,
@@ -13,7 +17,10 @@ pub const PostgresClient = struct {
 
     pub fn init(options: PgConOps, alloc: Allocator) !PostgresClient {
         const protocol = if (options.enable_tls) Protocol.tls else Protocol.plain;
-        const con = try Connection.init(options.host, options.port, protocol, alloc);
+        const con = Connection.init(options.host, options.port, protocol, alloc) catch {
+            std.debug.print("Invalid ip: {s}\n", .{options.host});
+            return ClientError.InvalidConnectionOptions;
+        };
         return PostgresClient{
             .allocator = alloc,
             .connection = con,
@@ -28,10 +35,14 @@ pub const PostgresClient = struct {
             .database = self.options.database,
         });
         const startup_msg_buf = try self.codec.encode(&startup_msg);
+        std.debug.print("encoded: ", .{});
+        for (startup_msg_buf) |x| std.debug.print("0x{x} ", .{x});
+        std.debug.print("\n", .{});
         try self.connection.write(startup_msg_buf);
-
-        const msg_buf = try self.connection.read();
-
+        const msg_buf = self.connection.read() catch |err| {
+            self.connection.deinit();
+            return err;
+        };
         const msg: codec.BackendMsg = try self.codec.decode(msg_buf);
         return msg;
     }
@@ -52,11 +63,11 @@ pub const ConnectionResult = union(enum) {
 };
 
 pub const PgConOps = struct {
-    host: []const u8,
-    port: u16,
-    enable_tls: bool,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 5882,
+    enable_tls: bool = false,
     user: []const u8,
-    database: ?[]const u8 = null,
+    database: ?[]const u8 = null, // defaults to username
     timeout: u32 = 30,
 };
 
@@ -76,8 +87,11 @@ pub const Connection = struct {
 
     pub fn init(host: []const u8, port: u16, protocol: Protocol, alloc: Allocator) !Connection {
         _ = protocol;
-        const address = try std.net.Address.parseIp4(host, port);
-        const stream = try std.net.tcpConnectToAddress(address);
+        const address = std.net.Address.parseIp4(host, port) catch return ClientError.InvalidConnectionOptions;
+        const stream = std.net.tcpConnectToAddress(address) catch |err| {
+            std.debug.print("shit\n", .{});
+            return err;
+        };
         errdefer stream.close();
 
         return .{
@@ -104,7 +118,6 @@ pub const Connection = struct {
         if (space > size) return;
 
         std.mem.copyForwards(u8, self.read_buf[self.read_start..self.read_end], self.read_buf[0..]);
-        // @memcpy(self.read_buf[self.read_start..self.read_end], self.read_buf[0..]);
         self.read_end = self.read_end - self.read_start;
         self.read_start = 0;
     }
@@ -140,7 +153,8 @@ pub const Connection = struct {
                 return msg;
             }
 
-            const n = try self.stream.read(&self.read_buf);
+            //blocks until something is read
+            const n = try self.stream.readAll(&self.read_buf);
 
             if (n == 0) return ReadError.ConnectionClosed;
             self.read_end += n;
@@ -150,19 +164,24 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         _ = self;
         return;
-        // self.client.connection_pool.release(self.alloc, self.connection);
-        // self.client.deinit();
     }
 };
 
 const TestServer = @import("./testing/tcp_server.zig");
 
-test "test client connection" {
-    var server = try TestServer.start(.{});
+test "invalid host" {
+    const alloc = std.testing.allocator;
 
+    try std.testing.expectError(
+        ClientError.InvalidConnectionOptions,
+        PostgresClient.init(.{ .user = "test", .host = "hosteded" }, alloc),
+    );
+}
+
+test "test client connection" {
     const con_opts: PgConOps = .{
         .host = "127.0.0.1",
-        .port = 5882,
+        .port = 8080,
         .enable_tls = false,
         .user = "test",
     };
@@ -179,6 +198,6 @@ test "test client connection" {
         },
         else => unreachable,
     }
-
-    server.stop();
 }
+
+//

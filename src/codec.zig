@@ -236,20 +236,22 @@ pub const StartupMsg = struct {
         const len_width = 4;
         const proto_width = 4;
 
-        const len: u32 = @intCast(width(self.database) + self.user.size() + len_width + proto_width); // len and proto width
+        const len: u32 = @intCast(width(self.database) + self.user.size() + len_width + proto_width + 1); // len and proto width final null byte
         w_pos += writeInt(len, buf[w_pos..len_width][0..len_width]);
         w_pos += writeInt(self.protocol, buf[w_pos .. w_pos + proto_width][0..proto_width]);
         w_pos += writeValuePair(self.user, buf[w_pos .. w_pos + self.user.size()][0..self.user.size()]);
         w_pos += writeOptional(self.database, w_pos, buf);
         w_pos += writeOptional(self.options, w_pos, buf);
         w_pos += writeOptional(self.replication, w_pos, buf);
+        buf[w_pos] = 0x00;
     }
 
     pub fn size(self: *const StartupMsg) usize {
         return 8 + width(self.user) +
             width(self.database) +
             width(self.options) +
-            width(self.replication);
+            width(self.replication) +
+            1; // trailing null byte
     }
 };
 
