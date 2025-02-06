@@ -8,12 +8,6 @@ const Protocol = http.Client.Connection.Protocol;
 const assert = std.debug.assert;
 
 pub fn main() !void {
-    // const con_opts: PgConOps = .{
-    //     .host = "127.0.0.1",
-    //     .port = 8080,
-    //     .enable_tls = false,
-    //     .user = "test",
-    // };
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
     defer _ = gpa.deinit();
@@ -29,10 +23,5 @@ pub fn main() !void {
 
     const res = try client.connect();
 
-    switch (res) {
-        .Auth => |auth| {
-            std.debug.assert(auth.auth_type == .Ok);
-        },
-        else => unreachable,
-    }
+    std.debug.print("connection res: {}", .{res});
 }

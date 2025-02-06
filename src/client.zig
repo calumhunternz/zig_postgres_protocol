@@ -5,13 +5,19 @@ const http = std.http;
 const Allocator = std.mem.Allocator;
 const Protocol = http.Client.Connection.Protocol;
 
+pub fn print_slice(slice: anytype, tag: []const u8) void {
+    std.debug.print("{s}: ", .{tag});
+    for (slice) |x| std.debug.print("{x} ", .{x});
+    std.debug.print("\n", .{});
+}
+
 pub const ClientError = error{
     InvalidConnectionOptions,
 };
 
 pub const PostgresClient = struct {
     allocator: Allocator,
-    connection: Connection,
+    conn: Connection,
     codec: Codec,
     options: PgConOps,
 
@@ -23,34 +29,70 @@ pub const PostgresClient = struct {
         };
         return PostgresClient{
             .allocator = alloc,
-            .connection = con,
+            .conn = con,
             .codec = Codec.init(alloc),
             .options = options,
         };
     }
 
-    pub fn connect(self: *PostgresClient) !codec.BackendMsg {
-        const startup_msg = codec.FrontendMsg.new(.Startup, .{
-            .user = self.options.user,
-            .database = self.options.database,
-        });
+    pub fn connect(self: *PostgresClient) !ConnectionResult {
+        const startup_msg = codec.FrontendMsg{
+            .Startup = codec.StartupMsg.new(self.options.user, self.options.database),
+        };
         const startup_msg_buf = try self.codec.encode(&startup_msg);
-        std.debug.print("encoded: ", .{});
-        for (startup_msg_buf) |x| std.debug.print("0x{x} ", .{x});
-        std.debug.print("\n", .{});
-        try self.connection.write(startup_msg_buf);
-        const msg_buf = self.connection.read() catch |err| {
-            self.connection.deinit();
+
+        try self.conn.write(startup_msg_buf);
+
+        const msg_buf = self.conn.read() catch |err| {
+            self.conn.deinit();
             return err;
         };
+
         const msg: codec.BackendMsg = try self.codec.decode(msg_buf);
-        return msg;
+
+        return switch (msg) {
+            .Auth => |auth| {
+                try authenticate(auth);
+                return ConnectionResult.Ok;
+            },
+            .Error => |err| {
+                std.debug.print("Error: {}\n", .{err});
+                return ConnectionResult{ .Error = ConnectionError.CouldNotConnect };
+            },
+        };
     }
 
     pub fn deinit(self: *PostgresClient) void {
-        self.connection.deinit();
+        self.conn.deinit();
         self.codec.deinit();
     }
+};
+
+fn authenticate(auth_method: codec.AuthRes) AuthError!void {
+    const extra = switch (auth_method.extra) {
+        .SASL => |sasl_mech| sasl_mech,
+        else => return AuthError.NotSupported,
+    };
+    return switch (auth_method.auth_type) {
+        .Ok => return,
+        .SASL => {
+            std.debug.assert(auth_method.extra == .SASL);
+            switch (extra) {
+                .SCRAM_SHA_256_PLUS => return AuthError.NotSupported,
+                .SCRAM_SHA_256 => {},
+            }
+        },
+        else => AuthError.NotSupported,
+    };
+}
+
+const AuthError = error{
+    NotSupported,
+};
+
+const AuthResult = union(enum) {
+    Error: AuthError,
+    Ok,
 };
 
 const ConnectionError = error{
@@ -87,9 +129,10 @@ pub const Connection = struct {
 
     pub fn init(host: []const u8, port: u16, protocol: Protocol, alloc: Allocator) !Connection {
         _ = protocol;
+
         const address = std.net.Address.parseIp4(host, port) catch return ClientError.InvalidConnectionOptions;
+        // TODO: add timeout (requires accessing the posix socket instead of stream since the setting is not exposed via higher level api)
         const stream = std.net.tcpConnectToAddress(address) catch |err| {
-            std.debug.print("shit\n", .{});
             return err;
         };
         errdefer stream.close();
@@ -130,7 +173,8 @@ pub const Connection = struct {
             return null;
         }
 
-        const len = std.mem.readInt(u32, self.read_buf[self.read_start + 1 .. self.read_end][0..4], .little);
+        const len = std.mem.readInt(u32, self.read_buf[self.read_start + 1 .. self.read_end][0..4], .big);
+
         const msg_type_size = 1;
         const msg_size = len + msg_type_size;
 
@@ -152,9 +196,10 @@ pub const Connection = struct {
                 std.debug.print("\n", .{});
                 return msg;
             }
+            std.debug.print("read end: {d}\n", .{self.read_end});
 
-            //blocks until something is read
-            const n = try self.stream.readAll(&self.read_buf);
+            //blocks until something is read (using read all blocks until the buffer is filled)
+            const n = try self.stream.read(&self.read_buf);
 
             if (n == 0) return ReadError.ConnectionClosed;
             self.read_end += n;
@@ -192,12 +237,5 @@ test "test client connection" {
 
     const res = try client.connect();
 
-    switch (res) {
-        .Auth => |auth| {
-            std.debug.assert(auth.auth_type == .Ok);
-        },
-        else => unreachable,
-    }
+    std.debug.assert(res == .Ok);
 }
-
-//
