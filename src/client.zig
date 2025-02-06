@@ -36,7 +36,7 @@ pub const PostgresClient = struct {
     }
 
     pub fn connect(self: *PostgresClient) !ConnectionResult {
-        const startup_msg = codec.FrontendMsg{
+        const startup_msg = Codec.FrontendMsg{
             .Startup = codec.StartupMsg.new(self.options.user, self.options.database),
         };
         const startup_msg_buf = try self.codec.encode(&startup_msg);
