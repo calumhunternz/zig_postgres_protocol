@@ -3,8 +3,17 @@ const assert = std.debug.assert;
 const types = @import("./types.zig");
 const Reader = types.Reader;
 const SASLMechanism = types.SASLMechanism;
+const AuthType = types.AuthType;
 
-const ErrorRes = struct {
+pub fn print_slice(slice: anytype, as_char: bool, tag: []const u8) void {
+    std.debug.print("{s}: ", .{tag});
+    for (slice) |x| {
+        if (as_char) std.debug.print("{c} ", .{x}) else std.debug.print("{x} ", .{x});
+    }
+    std.debug.print("\n", .{});
+}
+
+pub const ErrorRes = struct {
     error_type: ErrorType,
     field: ?[]const u8 = null,
 
@@ -46,46 +55,63 @@ pub const AuthRes = struct {
     auth_type: AuthType,
     extra: AuthExtra = .None,
 
-    const AuthType = enum(u32) {
-        Ok = 0,
-        KerberosV5 = 2,
-        ClearTextPassword = 3,
-        MD5Password = 5,
-        GSS = 7,
-        GSSContinue = 8,
-        SSPI = 9,
-        SASL = 10,
-        SASLContinue = 11,
-        SASLFinal = 12,
-    };
-
     const AuthExtra = union(enum) {
         MD5Password: struct { salt: [4]u8 },
         GSSContinue: struct { data: []u8 },
         SASL: SASLMechanism, // null terminated list of auth schemes will require enum once those are found.
-        SASLContinue: struct { data: []u8 },
+        SASLContinue: struct {
+            server_nonce: []const u8,
+            salt: []const u8,
+            iteration: u32,
+            server_response: []const u8,
+        },
         SALSFinal: struct { data: []u8 },
         None,
     };
 
     const DecodeError = error{
         NoSaslMechanism,
+        ParseError,
     };
 
     pub fn decode(reader: *Reader) !AuthRes {
-        const auth_type: AuthType = @enumFromInt(reader.readu32());
+        const auth_type: AuthType = @enumFromInt(reader.readInt32());
+        std.debug.print("auth_type: {}\n", .{auth_type});
         const extra: AuthExtra = switch (auth_type) {
             .SASL => extra: {
                 const mechanism = reader.readToDelimeter(0x00); // Server sends in order of preference so only the first one is needed
+                assert(mechanism != null);
                 // Should this be assert or error since it is coming over wire stuff could go bad.
-                assert(std.mem.eql(u8, mechanism, "SCRAM-SHA-256") or std.mem.eql(u8, mechanism, "SCRAM-SHA-256-PLUS"));
+                assert(std.mem.eql(u8, mechanism.?, "SCRAM-SHA-256") or std.mem.eql(u8, mechanism.?, "SCRAM-SHA-256-PLUS"));
 
-                if (std.mem.eql(u8, mechanism, "SCRAM-SHA-256")) {
+                if (std.mem.eql(u8, mechanism.?, "SCRAM-SHA-256")) {
                     break :extra .{ .SASL = SASLMechanism.SCRAM_SHA_256 };
-                } else if (std.mem.eql(u8, mechanism, "SCRAM-SHA-256-PLUS")) {
+                } else if (std.mem.eql(u8, mechanism.?, "SCRAM-SHA-256-PLUS")) {
                     break :extra .{ .SASL = SASLMechanism.SCRAM_SHA_256_PLUS };
                 }
                 unreachable;
+            },
+            .SASLContinue => extra: {
+                const start = reader.r_pos;
+                reader.skip(2); //skips r=
+                const server_nonce = reader.readToDelimeter(',');
+                assert(server_nonce != null);
+                assert(server_nonce.?.len > 2);
+
+                reader.skip(2);
+                const salt = reader.readToDelimeter(',');
+
+                reader.skip(2); // skips i=
+                const iteration = try reader.readIntStr(u32, 4);
+
+                print_slice(salt.?, true, "salt");
+                std.debug.print("iteration: {d}\n", .{iteration});
+                break :extra .{ .SASLContinue = .{
+                    .server_nonce = server_nonce.?,
+                    .salt = salt.?,
+                    .iteration = iteration,
+                    .server_response = reader.buf[start..reader.r_pos],
+                } };
             },
             else => AuthExtra.None,
         };

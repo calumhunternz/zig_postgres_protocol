@@ -5,6 +5,7 @@ const frontend_msg = @import("./frontend_messages.zig");
 const types = @import("./types.zig");
 const Reader = types.Reader;
 const Writer = types.Writer;
+const SASLMechanism = types.SASLMechanism;
 
 const Codec = @This();
 
@@ -21,11 +22,11 @@ pub fn init(alloc: std.mem.Allocator) Codec {
 pub fn decode(self: *Codec, buf: []const u8) !BackendMsg {
     _ = self;
     var reader = Reader.reader(buf);
-    return try BackendMsg.decode(buf, &reader);
+    return BackendMsg.decode(&reader);
 }
 
 pub fn encode(self: *Codec, msg: *const FrontendMsg) ![]const u8 {
-    const buf = try self.alloc.alloc(u8, msg.size());
+    const buf = try self.alloc.alloc(u8, msg.size()); // TODO: rafactor to re-use buffers
     try self.store.append(buf);
     var writer = Writer.writer(buf);
     try msg.encode(&writer);
@@ -73,7 +74,7 @@ pub const BackendMsg = union(enum) {
     fn parseHeader(reader: *Reader) Header {
         return .{
             .msg_type = @as(MsgType, @enumFromInt(reader.readByte1())),
-            .len = reader.readu32(),
+            .len = reader.readInt32(),
         };
     }
 
@@ -87,16 +88,37 @@ pub const BackendMsg = union(enum) {
             else => return,
         }
     }
+
+    pub fn log(self: *const BackendMsg) void {
+        switch (self.*) {
+            .Error => |err| {
+                std.debug.print("Error: {} {?s}\n", .{ err.error_type, err.field });
+            },
+            .Auth => |auth| {
+                std.debug.print("Auth: {} {}\n", .{ auth.auth_type, auth.extra });
+            },
+        }
+    }
 };
 
-pub const FrontendMsg = union(FrontendMsgType) {
+pub const FrontendMsg = union(enum) {
     Startup: frontend_msg.StartupMsg,
     SASLInit: frontend_msg.SASLInitMsg,
+    SASLRes: frontend_msg.SASLResMsg,
 
-    const FrontendMsgType = enum {
-        Startup,
-        SASLInit,
+    pub const MsgParam = union(enum) {
+        Startup: struct { user: []const u8, database: ?[]const u8 },
+        SASLInit: struct { mech: SASLMechanism, user: []const u8 },
+        SASLRes: struct { client_final_msg: []const u8 },
     };
+
+    pub fn new(msg_param: MsgParam) FrontendMsg {
+        return switch (msg_param) {
+            .Startup => |param| FrontendMsg{ .Startup = frontend_msg.StartupMsg.new(param.user, param.database) },
+            .SASLInit => |param| FrontendMsg{ .SASLInit = frontend_msg.SASLInitMsg.new(param.mech, param.user) },
+            .SASLRes => |param| FrontendMsg{ .SASLRes = frontend_msg.SASLResMsg.new(param.client_final_msg) },
+        };
+    }
 
     pub fn encode(
         self: *const FrontendMsg,
@@ -105,6 +127,7 @@ pub const FrontendMsg = union(FrontendMsgType) {
         return switch (self.*) {
             .Startup => |startup_msg| startup_msg.encode(writer),
             .SASLInit => |sasl_initial_msg| sasl_initial_msg.encode(writer),
+            .SASLRes => |sasl_response_msg| sasl_response_msg.encode(writer),
         };
     }
 
@@ -112,6 +135,7 @@ pub const FrontendMsg = union(FrontendMsgType) {
         return switch (self.*) {
             .Startup => |startup| startup.size(),
             .SASLInit => |sasl_init| sasl_init.size(),
+            .SASLRes => |sasl_res| sasl_res.size(),
         };
     }
 };

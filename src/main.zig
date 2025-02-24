@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("./client.zig");
 
-const PostgresClient = c.PostgresClient;
+const PostgresClient = c.PgClient;
 const http = std.http;
 const Allocator = std.mem.Allocator;
 const Protocol = http.Client.Connection.Protocol;
@@ -23,5 +23,5 @@ pub fn main() !void {
 
     const res = try client.connect();
 
-    std.debug.print("connection res: {}", .{res});
+    std.debug.print("connection res: {}\n", .{res});
 }

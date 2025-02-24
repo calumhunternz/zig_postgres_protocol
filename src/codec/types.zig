@@ -28,7 +28,6 @@ pub const Writer = struct {
 
     pub fn writeSlice(self: *Writer, val: anytype) void {
         assert(@typeInfo(@TypeOf(val)) == .Pointer);
-        assert(@typeInfo(@TypeOf(val)).Pointer.child == u8);
         assert(self.buf.len >= self.w_pos + val.len);
 
         @memcpy(self.buf[self.w_pos .. self.w_pos + val.len][0..val.len], val);
@@ -72,24 +71,34 @@ pub const Reader = struct {
         return byte.?;
     }
 
-    pub fn readu32(self: *Reader) u32 {
+    pub fn readInt32(self: *Reader) u32 {
         assert(self.r_pos < self.buf.len);
         assert(self.r_pos <= self.buf.len - 4);
+
         const num = std.mem.readInt(u32, self.buf[self.r_pos .. self.r_pos + 4][0..4], .big);
         self.r_pos += 4;
         return num;
     }
 
-    pub fn readToDelimeter(self: *Reader, delimeter: u8) []const u8 {
+    pub fn readIntStr(self: *Reader, comptime T: type, size: usize) !T {
+        assert(@typeInfo(T) == .Int);
+        const num = try std.fmt.parseInt(T, self.buf[self.r_pos .. self.r_pos + size], 10);
+        self.r_pos += 4;
+        return num;
+    }
+
+    pub fn readToDelimeter(self: *Reader, delimeter: u8) ?[]const u8 {
         const start = self.r_pos;
         while (self.r_pos - start < self.buf[start..].len) {
             if (self.peek() == delimeter) {
                 self.r_pos += 1;
-                break;
+                const buf = self.buf[start..self.r_pos];
+                self.r_pos += 1; // skip past delimeter
+                return buf;
             }
             self.r_pos += 1;
         }
-        return self.buf[start..self.r_pos];
+        return null;
     }
 
     pub fn readRemaining(self: *Reader) ?[]const u8 {
@@ -106,6 +115,11 @@ pub const Reader = struct {
         const byte = self.buf[self.r_pos];
         self.r_pos += 1;
         return byte;
+    }
+
+    pub fn skip(self: *Reader, n: usize) void {
+        assert(self.buf.len >= self.r_pos + n);
+        self.r_pos += n;
     }
 
     pub fn peek(self: *Reader) ?u8 {
@@ -134,4 +148,17 @@ pub const SASLMechanism = enum {
             .SCRAM_SHA_256_PLUS => "SCRAM-SHA-256-PLUS",
         };
     }
+};
+
+pub const AuthType = enum(u32) {
+    Ok = 0,
+    KerberosV5 = 2,
+    ClearTextPassword = 3,
+    MD5Password = 5,
+    GSS = 7,
+    GSSContinue = 8,
+    SSPI = 9,
+    SASL = 10,
+    SASLContinue = 11,
+    SASLFinal = 12,
 };
