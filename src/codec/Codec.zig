@@ -5,7 +5,7 @@ const frontend_msg = @import("./frontend_messages.zig");
 const types = @import("./types.zig");
 const Reader = types.Reader;
 const Writer = types.Writer;
-const SASLMechanism = types.SASLMechanism;
+pub const SASLMechanism = types.SASLMechanism;
 
 const Codec = @This();
 
@@ -108,14 +108,14 @@ pub const FrontendMsg = union(enum) {
 
     pub const MsgParam = union(enum) {
         Startup: struct { user: []const u8, database: ?[]const u8 },
-        SASLInit: struct { mech: SASLMechanism, user: []const u8 },
+        SASLInit: struct { mech: SASLMechanism, client_first_msg: []const u8 },
         SASLRes: struct { client_final_msg: []const u8 },
     };
 
     pub fn new(msg_param: MsgParam) FrontendMsg {
         return switch (msg_param) {
             .Startup => |param| FrontendMsg{ .Startup = frontend_msg.StartupMsg.new(param.user, param.database) },
-            .SASLInit => |param| FrontendMsg{ .SASLInit = frontend_msg.SASLInitMsg.new(param.mech, param.user) },
+            .SASLInit => |param| FrontendMsg{ .SASLInit = frontend_msg.SASLInitMsg.new(param.mech, param.client_first_msg) },
             .SASLRes => |param| FrontendMsg{ .SASLRes = frontend_msg.SASLResMsg.new(param.client_final_msg) },
         };
     }

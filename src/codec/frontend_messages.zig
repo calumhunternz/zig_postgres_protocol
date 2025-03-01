@@ -1,18 +1,10 @@
 const std = @import("std");
+const debug = @import("../testing/debug_utils.zig");
 const types = @import("./types.zig");
 const Writer = types.Writer;
 const ValuePair = types.ValuePair;
 const SASLMechanism = types.SASLMechanism;
 
-pub fn print_slice(slice: anytype, tag: []const u8) void {
-    std.debug.print("{s}: ", .{tag});
-    for (slice) |x| {
-        if (x == 0xf8) break; // undefined memory
-        // std.debug.print("0x{x} ", .{x});
-        std.debug.print("{c} ", .{x});
-    }
-    std.debug.print("\n", .{});
-}
 pub const StartupMsg = struct {
     protocol: u32 = 0x00030000, // 16 sig bit for major 16 bit for minor
     user: ValuePair,
@@ -48,15 +40,17 @@ pub const StartupMsg = struct {
 pub const SASLInitMsg = struct {
     msg_type: u8 = 'p',
     mech: SASLMechanism,
-    user: []const u8,
+    client_first_message: []const u8,
 
-    pub fn new(mech: SASLMechanism, user: []const u8) SASLInitMsg {
-        return .{ .mech = mech, .user = user };
+    pub fn new(mech: SASLMechanism, client_first_message: []const u8) SASLInitMsg {
+        return .{
+            .mech = mech,
+            .client_first_message = client_first_message,
+        };
     }
 
     pub fn size(self: *const SASLInitMsg) usize {
-        const prefix = "n,,n=postgres,r=";
-        return 4 + self.mech.str().len + 1 + 4 + prefix.len + std.base64.standard.Encoder.calcSize(18) + 1;
+        return 4 + self.mech.str().len + 1 + 4 + self.client_first_message.len + 1;
     }
 
     pub fn encode(self: SASLInitMsg, writer: *Writer) void {
@@ -64,15 +58,8 @@ pub const SASLInitMsg = struct {
         writer.writeInt(@as(u32, @intCast(self.size() - 1))); // len does not include msg_type
         writer.writeSlice(self.mech.str());
         writer.writeByte(0x00);
-        const prefix = "n,,n=postgres,r=";
-        var nonce: [18]u8 = undefined; // TODO: make nonce len configurable or sensable default
-        std.crypto.random.bytes(&nonce);
-
-        writer.writeInt(@as(u32, @intCast(prefix.len + std.base64.standard.Encoder.calcSize(18))));
-
-        writer.writeSlice(prefix);
-        _ = std.base64.standard.Encoder.encode(writer.buf[writer.w_pos..], &nonce);
-        std.debug.print("NONCE: {s}\n", .{writer.buf[writer.w_pos..]});
+        writer.writeInt(@as(u32, @intCast(self.client_first_message.len)));
+        writer.writeSlice(self.client_first_message);
     }
 };
 
@@ -122,10 +109,19 @@ test "Startup" {
     try std.testing.expect(std.mem.eql(u8, expect, buf));
 }
 
+pub fn print_slice(slice: anytype, tag: []const u8) void {
+    std.debug.print("{s}: ", .{tag});
+    for (slice) |x| {
+        // if (x == 0xf8 or x == 0xb8) break; // undefined memory
+        std.debug.print("{X:0>2} ", .{x});
+    }
+    std.debug.print("\n", .{});
+}
+
 test "SASLInit" {
     const msg = SASLInitMsg{
         .mech = .SCRAM_SHA_256,
-        .user = "hello there",
+        .client_first_message = "n,,n=postgres,r=ABC123",
     };
     const alloc = std.testing.allocator;
     const buf = try alloc.alloc(u8, msg.size());
@@ -135,13 +131,18 @@ test "SASLInit" {
     msg.encode(&writer);
 
     const expect = &[_]u8{
-        'p',  0x00, 0x00, 0x00, 0x22,
+        'p',  0x00, 0x00, 0x00, 0x2C,
         'S',  'C',  'R',  'A',  'M',
         '-',  'S',  'H',  'A',  '-',
         '2',  '5',  '6',  0x00, 0x00,
-        0x00, 0x00, 0x0b, 'h',  'e',
-        'l',  'l',  'o',  ' ',  't',
-        'h',  'e',  'r',  'e',  0x00,
+        0x00, 0x00, 0x16, 'n',  ',',
+        ',',  'n',  '=',  'p',  'o',
+        's',  't',  'g',  'r',  'e',
+        's',  ',',  'r',  '=',  'A',
+        'B',  'C',  '1',  '2',  '3',
     };
+    print_slice(buf, "res");
+    print_slice(expect, "exp");
+
     try std.testing.expect(std.mem.eql(u8, expect, buf));
 }
