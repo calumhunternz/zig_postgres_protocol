@@ -91,63 +91,29 @@ pub const PgClient = struct {
             .Ok => return,
             .SASL => {
                 std.debug.assert(auth_method.extra == .SASL);
-                var authenticator = auth.SASLAuth.init(&self.conn, &self.codec);
+                var authenticator = auth.SASLAuth.init(
+                    self.options.user,
+                    self.options.password,
+                    &self.conn,
+                    &self.codec,
+                );
                 const client_first_message = authenticator.initialResponse(
                     auth_method.extra.SASL,
-                    self.options.user,
                     18,
                     self.allocator,
                 ) catch |e| {
-                    std.debug.print("error: {}\n", .{e});
+                    std.debug.print("sasl initial response failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
                 defer self.allocator.free(client_first_message);
-
-                print_slice_ch(client_first_message, "client_first_message");
-
-                const res = self.conn.read() catch |e| {
-                    std.debug.print("error: {}\n", .{e});
+                authenticator.initialServerResponse() catch |e| {
+                    std.debug.print("sasl initial server response failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
-
-                print_slice(res, "sasl initial msg res");
-                const sasl_continue = self.codec.decode(res) catch |e| {
-                    std.debug.print("error: {}\n", .{e});
-                    self.conn.deinit();
-                    return AuthError.InternalError;
-                };
-
-                // print_slice_ch(initial_msg_buf, "jskhfkjsdhfkjsdhfksdjh");
-                const client_first_bare = client_first_message[3..];
-
-                var msg_buf: [1026]u8 = undefined;
-                const client_final_message_buf = scram(
-                    self.options.password,
-                    sasl_continue.Auth.extra.SASLContinue.server_nonce,
-                    sasl_continue.Auth.extra.SASLContinue.salt,
-                    sasl_continue.Auth.extra.SASLContinue.iteration,
-                    client_first_bare,
-                    sasl_continue.Auth.extra.SASLContinue.server_response,
-                    &msg_buf,
-                ) catch |e| {
-                    std.debug.print("error: {}\n", .{e});
-                    return AuthError.InternalError;
-                };
-
-                const client_final_message = FMsg.new(MsgParam{ .SASLRes = .{
-                    .client_final_msg = client_final_message_buf,
-                } });
-
-                const client_final_message_buf2 = self.codec.encode(&client_final_message) catch |e| {
-                    std.debug.print("error: {}\n", .{e});
-                    self.conn.deinit();
-                    return AuthError.InternalError;
-                };
-
-                self.conn.write(client_final_message_buf2) catch |e| {
-                    std.debug.print("error: {}\n", .{e});
+                authenticator.clientFinalResponse() catch |e| {
+                    std.debug.print("sasl client final response failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
