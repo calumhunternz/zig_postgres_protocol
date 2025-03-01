@@ -106,7 +106,6 @@ pub const PgClient = struct {
 
                 print_slice_ch(client_first_message, "client_first_message");
 
-                std.debug.print("reading...\n", .{});
                 const res = self.conn.read() catch |e| {
                     std.debug.print("error: {}\n", .{e});
                     self.conn.deinit();
@@ -121,7 +120,7 @@ pub const PgClient = struct {
                 };
 
                 // print_slice_ch(initial_msg_buf, "jskhfkjsdhfkjsdhfksdjh");
-                const client_first_bare = client_first_message;
+                const client_first_bare = client_first_message[3..];
 
                 var msg_buf: [1026]u8 = undefined;
                 const client_final_message_buf = scram(

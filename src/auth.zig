@@ -35,9 +35,9 @@ pub const SASLAuth = struct {
         user: []const u8,
         nonce_len: usize,
         allocator: std.mem.Allocator,
-    ) ![]u8 {
+    ) ![]const u8 {
         std.debug.assert(nonce_len <= 50);
-        var buf = try allocator.alloc(u8, 5 + user.len + 3 + std.base64.standard.Encoder.calcSize(nonce_len));
+        const buf = try allocator.alloc(u8, 5 + user.len + 3 + std.base64.standard.Encoder.calcSize(nonce_len));
 
         @memcpy(buf[0..5], "n,,n=");
         @memcpy(buf[5..][0..user.len], user);
@@ -54,13 +54,10 @@ pub const SASLAuth = struct {
             .mech = mech,
             .client_first_msg = self.client_first_message,
         } });
-
         const initial_msg_buf = self.codec.encode(&initial_msg) catch |e| {
             std.debug.print("error: {}\n", .{e});
             return AuthError.InternalError;
         };
-
-        debug_util.print_slice(initial_msg_buf, "initial_message_buf");
 
         try self.conn.write(initial_msg_buf);
         return buf;
