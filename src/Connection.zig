@@ -66,7 +66,7 @@ fn bufferedMsg(self: *Connection) !?[]u8 {
         return null;
     }
 
-    const len = std.mem.readInt(u32, self.read_buf[self.read_start + 1 .. self.read_end][0..4], .big);
+    const len = std.mem.readInt(u32, self.read_buf[self.read_start + 1 ..][0..4], .big);
 
     const msg_type_size = 1;
     const msg_size = len + msg_type_size;
@@ -76,7 +76,7 @@ fn bufferedMsg(self: *Connection) !?[]u8 {
         try self.ensureSize(msg_size);
         return null;
     }
-    const msg = self.read_buf[self.read_start..self.read_end];
+    const msg = self.read_buf[self.read_start..][0..msg_size];
     self.read_start += msg_size;
     return msg;
 }

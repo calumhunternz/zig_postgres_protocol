@@ -65,7 +65,7 @@ pub const AuthRes = struct {
             iteration: u32,
             server_response: []const u8,
         },
-        SALSFinal: struct { data: []u8 },
+        SASLFinal: struct { data: ?[]const u8 },
         None,
     };
 
@@ -112,6 +112,11 @@ pub const AuthRes = struct {
                     .iteration = iteration,
                     .server_response = reader.buf[start..reader.r_pos],
                 } };
+            },
+            .SASLFinal => extra: {
+                reader.skip(2); // skip the v=
+                const verifier = reader.readRemaining();
+                break :extra .{ .SASLFinal = .{ .data = verifier } };
             },
             else => AuthExtra.None,
         };

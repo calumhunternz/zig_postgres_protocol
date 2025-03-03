@@ -23,27 +23,31 @@ const AuthError = error{
 };
 
 pub const SASLAuth = struct {
+    allocator: *std.mem.Allocator,
     conn: *Connection,
     codec: *Codec,
     user: []const u8,
-    pw: []const u8,
+    pw_salt: []const u8 = undefined,
     nonce: []const u8 = undefined,
     salt: []const u8 = undefined,
     iteration: u32 = 4096,
+    initial_msg: []u8 = undefined,
     client_first_message: []u8 = undefined,
     server_response: []const u8 = undefined,
+    client_final_message: []const u8 = undefined,
+    auth_message: []const u8 = undefined,
 
     pub fn init(
         user: []const u8,
-        password: []const u8,
         conn: *Connection,
         codec: *Codec,
+        allocator: *std.mem.Allocator,
     ) SASLAuth {
         return .{
             .conn = conn,
             .codec = codec,
             .user = user,
-            .pw = password,
+            .allocator = allocator,
         };
     }
 
@@ -51,10 +55,9 @@ pub const SASLAuth = struct {
         self: *SASLAuth,
         mech: SASLMechanism,
         nonce_len: usize,
-        allocator: std.mem.Allocator,
-    ) ![]const u8 {
+    ) !void {
         assert(nonce_len <= 50);
-        const buf = try allocator.alloc(u8, 5 + self.user.len + 3 + std.base64.standard.Encoder.calcSize(nonce_len));
+        const buf = try self.allocator.alloc(u8, 5 + self.user.len + 3 + std.base64.standard.Encoder.calcSize(nonce_len));
 
         @memcpy(buf[0..5], "n,,n=");
         @memcpy(buf[5..][0..self.user.len], self.user);
@@ -77,7 +80,6 @@ pub const SASLAuth = struct {
         };
 
         try self.conn.write(initial_msg_buf);
-        return buf;
     }
 
     pub fn initialServerResponse(self: *SASLAuth) !void {
@@ -94,11 +96,14 @@ pub const SASLAuth = struct {
         self.server_response = sasl_extra.server_response;
     }
 
-    pub fn clientFinalResponse(self: *SASLAuth) !void {
+    pub fn clientFinalResponse(
+        self: *SASLAuth,
+        password: []const u8,
+    ) !void {
         const client_first_bare = self.client_first_message[3..];
         var msg_buf: [1026]u8 = undefined;
-        const client_final_message = try scram(
-            self.pw,
+        const client_final_message = try self.scram(
+            password,
             self.nonce,
             self.salt,
             self.iteration,
@@ -115,7 +120,25 @@ pub const SASLAuth = struct {
         try self.conn.write(client_final_message_buf);
     }
 
+    pub fn verify(self: *SASLAuth) !void {
+        const sasl_final_buf = try self.conn.read();
+        const sasl_final = try self.codec.decode(sasl_final_buf);
+        const verifier = sasl_final.Auth.extra.SASLFinal.data;
+
+        var server_key: [m_len]u8 = undefined;
+        Hmac.create(&server_key, "Server Key", self.pw_salt);
+
+        var server_signature: [m_len]u8 = undefined;
+        Hmac.create(&server_signature, self.auth_message, &server_key);
+
+        var server_signature_encoded: [44]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&server_signature_encoded, &server_signature);
+
+        assert(std.mem.eql(u8, &server_signature_encoded, verifier.?));
+    }
+
     fn scram(
+        self: *SASLAuth,
         password: []const u8,
         server_nonce: []const u8,
         salt_encoded: []const u8,
@@ -139,10 +162,15 @@ pub const SASLAuth = struct {
             iterations,
             std.crypto.auth.hmac.sha2.HmacSha256,
         );
+        // TODO: avoid dupes
+        self.pw_salt = try self.allocator.dupe(u8, &salted_pw);
+
+        debug_util.print_slice(self.pw_salt, "pw salt");
+
         w_pos += m_len;
 
         var client_key: [m_len]u8 = buf[w_pos..][0..m_len].*;
-        Hmac.create(&client_key, "Client Key", &salted_pw);
+        Hmac.create(&client_key, "Client Key", self.pw_salt);
         w_pos += m_len;
 
         var stored_key: [m_len]u8 = buf[w_pos..][0..m_len].*;
@@ -173,6 +201,7 @@ pub const SASLAuth = struct {
         w_pos += 9 + server_nonce.len;
 
         const auth_message_without_proof = buf[auth_msg_start..w_pos];
+        self.auth_message = try self.allocator.dupe(u8, auth_message_without_proof);
 
         buf[w_pos] = ',';
         w_pos += 1;
@@ -194,6 +223,12 @@ pub const SASLAuth = struct {
 
         const response = buf[res_start..w_pos];
         return response;
+    }
+
+    pub fn deinit(self: *SASLAuth) void {
+        self.allocator.free(self.client_first_message);
+        self.allocator.free(self.pw_salt);
+        self.allocator.free(self.auth_message);
     }
 
     test "scram" {

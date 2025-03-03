@@ -93,39 +93,37 @@ pub const PgClient = struct {
                 std.debug.assert(auth_method.extra == .SASL);
                 var authenticator = auth.SASLAuth.init(
                     self.options.user,
-                    self.options.password,
                     &self.conn,
                     &self.codec,
+                    &self.allocator,
                 );
-                const client_first_message = authenticator.initialResponse(
+                defer authenticator.deinit();
+
+                authenticator.initialResponse(
                     auth_method.extra.SASL,
                     18,
-                    self.allocator,
                 ) catch |e| {
                     std.debug.print("sasl initial response failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
-                defer self.allocator.free(client_first_message);
                 authenticator.initialServerResponse() catch |e| {
                     std.debug.print("sasl initial server response failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
-                authenticator.clientFinalResponse() catch |e| {
+                authenticator.clientFinalResponse(self.options.password) catch |e| {
                     std.debug.print("sasl client final response failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
 
-                std.debug.print("reading...\n", .{});
-                const res_from_final = self.conn.read() catch |e| {
-                    std.debug.print("error: {}\n", .{e});
+                authenticator.verify() catch |e| {
+                    std.debug.print("sasl final verify failed: {}\n", .{e});
                     self.conn.deinit();
                     return AuthError.InternalError;
                 };
 
-                print_slice(res_from_final, "res from final");
                 return;
             },
             else => AuthError.NotSupported,
