@@ -37,6 +37,8 @@ pub const SASLAuth = struct {
     client_final_message: []const u8 = undefined,
     auth_message: []const u8 = undefined,
 
+    const NONCE_SIZE: u32 = 18;
+
     pub fn init(
         user: []const u8,
         conn: *Connection,
@@ -48,6 +50,29 @@ pub const SASLAuth = struct {
             .codec = codec,
             .user = user,
             .allocator = allocator,
+        };
+    }
+
+    pub fn authenticate(self: *SASLAuth, pw: []const u8, mech: SASLMechanism) !void {
+        self.initialResponse(
+            mech,
+            NONCE_SIZE,
+        ) catch |e| {
+            std.debug.print("sasl initial response failed: {}\n", .{e});
+            return AuthError.InternalError;
+        };
+        self.initialServerResponse() catch |e| {
+            std.debug.print("sasl initial server response failed: {}\n", .{e});
+            return AuthError.InternalError;
+        };
+        self.clientFinalResponse(pw) catch |e| {
+            std.debug.print("sasl client final response failed: {}\n", .{e});
+            return AuthError.InternalError;
+        };
+
+        self.verify() catch |e| {
+            std.debug.print("sasl final verify failed: {}\n", .{e});
+            return AuthError.InternalError;
         };
     }
 
@@ -164,8 +189,6 @@ pub const SASLAuth = struct {
         );
         // TODO: avoid dupes
         self.pw_salt = try self.allocator.dupe(u8, &salted_pw);
-
-        debug_util.print_slice(self.pw_salt, "pw salt");
 
         w_pos += m_len;
 

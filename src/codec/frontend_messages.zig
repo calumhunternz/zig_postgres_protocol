@@ -1,7 +1,7 @@
 const std = @import("std");
 const debug = @import("../testing/debug_utils.zig");
 const types = @import("./types.zig");
-const Writer = types.Writer;
+const Writer = @import("./writer.zig");
 const ValuePair = types.ValuePair;
 const SASLMechanism = types.SASLMechanism;
 

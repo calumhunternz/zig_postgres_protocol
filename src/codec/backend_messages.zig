@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const types = @import("./types.zig");
-const Reader = types.Reader;
+const Reader = @import("./reader.zig");
 const SASLMechanism = types.SASLMechanism;
 const AuthType = types.AuthType;
 
@@ -76,7 +76,6 @@ pub const AuthRes = struct {
 
     pub fn decode(reader: *Reader) !AuthRes {
         const auth_type: AuthType = @enumFromInt(reader.readInt32());
-        std.debug.print("auth_type: {}\n", .{auth_type});
         const extra: AuthExtra = switch (auth_type) {
             .SASL => extra: {
                 const mechanism = reader.readToDelimeter(0x00); // Server sends in order of preference so only the first one is needed
@@ -104,7 +103,6 @@ pub const AuthRes = struct {
                 reader.skip(2); // skips i=
                 const iteration = try reader.readIntStr(u32, 4);
 
-                print_slice(salt.?, true, "salt");
                 std.debug.print("iteration: {d}\n", .{iteration});
                 break :extra .{ .SASLContinue = .{
                     .server_nonce = server_nonce.?,

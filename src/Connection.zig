@@ -88,7 +88,6 @@ pub fn read_raw(self: *Connection) ![]u8 {
     self.read_end += n;
     const buf = self.read_buf[self.read_start..self.read_end];
     self.read_start = self.read_end;
-    print_slice(self.read_buf, "buffed innit");
     return buf;
 }
 

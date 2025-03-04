@@ -2,20 +2,28 @@ const std = @import("std");
 const assert = std.debug.assert;
 const backend_msg = @import("./backend_messages.zig");
 const frontend_msg = @import("./frontend_messages.zig");
+const Reader = @import("./reader.zig");
+const Writer = @import("./writer.zig");
 const types = @import("./types.zig");
-const Reader = types.Reader;
-const Writer = types.Writer;
 pub const SASLMechanism = types.SASLMechanism;
 
 const Codec = @This();
 
 alloc: std.mem.Allocator,
 store: std.ArrayList([]u8),
+w_buf: []u8,
+writer: Writer,
+// reader: Reader,
 
-pub fn init(alloc: std.mem.Allocator) Codec {
+pub fn init(alloc: std.mem.Allocator) !Codec {
+    var store = std.ArrayList([]u8).init(alloc);
+    const buf = try alloc.alloc(u8, 1026);
+    try store.append(buf);
     return Codec{
         .alloc = alloc,
-        .store = std.ArrayList([]u8).init(alloc),
+        .store = store,
+        .w_buf = buf,
+        .writer = Writer.writer(buf),
     };
 }
 
@@ -26,11 +34,15 @@ pub fn decode(self: *Codec, buf: []const u8) !BackendMsg {
 }
 
 pub fn encode(self: *Codec, msg: *const FrontendMsg) ![]const u8 {
-    const buf = try self.alloc.alloc(u8, msg.size()); // TODO: rafactor to re-use buffers
-    try self.store.append(buf);
-    var writer = Writer.writer(buf);
-    try msg.encode(&writer);
-    return buf;
+    if (msg.size() > self.w_buf.len) {
+        const buf = try self.alloc.alloc(u8, msg.size());
+        try self.store.append(buf);
+        self.w_buf = buf;
+    }
+
+    self.writer.init(self.w_buf[0..msg.size()]);
+    try msg.encode(&self.writer);
+    return self.w_buf[0..msg.size()];
 }
 
 pub fn deinit(self: *Codec) void {
