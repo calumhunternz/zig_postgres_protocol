@@ -5,6 +5,12 @@ stopped: std.atomic.Value(bool),
 thread: std.Thread,
 pub const TestServer = @This();
 
+// THIS DOES NOT WORK
+// I attempted to create a testing server to spoof a database connection
+// that would run in a seperate thread during tests to check handling of
+// various responses and messages but was spending to much time on it
+// and opted for just testing against a locally running db instance.
+
 pub const Server = struct {
     address: std.net.Address,
     server: std.net.Server,
@@ -83,8 +89,6 @@ pub const Server = struct {
 
         stopped.store(false, .seq_cst);
         var conn = try server.accept();
-        std.debug.print("ljlkjljlj: {}\n", .{stopped});
-        // running.store(true, .seq_cst);
         errdefer conn.stream.close();
         var reader = Reader{ .stream = conn.stream };
 

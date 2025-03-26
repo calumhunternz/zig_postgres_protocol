@@ -13,7 +13,6 @@ alloc: std.mem.Allocator,
 store: std.ArrayList([]u8),
 w_buf: []u8,
 writer: Writer,
-// reader: Reader,
 
 pub fn init(alloc: std.mem.Allocator) !Codec {
     var store = std.ArrayList([]u8).init(alloc);

@@ -48,6 +48,8 @@ pub const ReadError = error{
     ConnectionClosed,
 };
 
+// TODO: THis currently uses a ring buffer but could potentially overflow if message read is larger than the buffer size.
+// need to either convert to allocator based buffer or figure out maximum buffer size required to for a message
 fn ensureSize(self: *Connection, size: usize) !void {
     if (self.read_buf.len < size) return ReadError.ReadBufTooSmall;
     const space = self.read_buf.len - self.read_start;

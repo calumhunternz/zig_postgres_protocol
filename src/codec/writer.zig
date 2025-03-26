@@ -8,10 +8,6 @@ const Writer = @This();
 w_pos: usize = 0,
 buf: []u8,
 
-// create an instance
-// give it a new buffer and reset it w_pos
-// re-use buffer and reset w_pos
-
 pub fn writer(buf: []u8) Writer {
     return Writer{ .buf = buf };
 }

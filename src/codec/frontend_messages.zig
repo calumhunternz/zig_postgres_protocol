@@ -112,7 +112,6 @@ test "Startup" {
 pub fn print_slice(slice: anytype, tag: []const u8) void {
     std.debug.print("{s}: ", .{tag});
     for (slice) |x| {
-        // if (x == 0xf8 or x == 0xb8) break; // undefined memory
         std.debug.print("{X:0>2} ", .{x});
     }
     std.debug.print("\n", .{});
@@ -141,8 +140,6 @@ test "SASLInit" {
         's',  ',',  'r',  '=',  'A',
         'B',  'C',  '1',  '2',  '3',
     };
-    print_slice(buf, "res");
-    print_slice(expect, "exp");
 
     try std.testing.expect(std.mem.eql(u8, expect, buf));
 }

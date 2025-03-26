@@ -22,6 +22,9 @@ const AuthError = error{
     InternalError,
 };
 
+// This is an implementation of RFC-7677
+// https://datatracker.ietf.org/doc/html/rfc7677
+// Which defines the steps required for SASL AUTH
 pub const SASLAuth = struct {
     allocator: *std.mem.Allocator,
     conn: *Connection,
@@ -187,6 +190,7 @@ pub const SASLAuth = struct {
             iterations,
             std.crypto.auth.hmac.sha2.HmacSha256,
         );
+
         // TODO: avoid dupes
         self.pw_salt = try self.allocator.dupe(u8, &salted_pw);
 

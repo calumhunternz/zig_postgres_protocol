@@ -127,7 +127,6 @@ pub const AuthRes = struct {
 };
 
 test "AuthRes" {
-    // const input = &[_]u8{ 'R', 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00 };
     const input = &[_]u8{ 0x00, 0x00, 0x00, 0x00 };
     var reader = Reader.reader(input);
     const result = try AuthRes.decode(&reader);
@@ -140,7 +139,6 @@ test "AuthRes" {
 }
 
 test "ErrorRes" {
-    // const input = &[_]u8{ 'E', 0x00, 0x00, 0x00, 0x0a, 'S', 'P', 'A', 'N', 'I', 'C' };
     const input = &[_]u8{ 'S', 'P', 'A', 'N', 'I', 'C' };
     var reader = Reader.reader(input);
     const result = try ErrorRes.decode(&reader);
